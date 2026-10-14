@@ -1,0 +1,15 @@
+# Grafana 启动时读取本文件，自动创建数据源（不用手工在界面里点）。
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus # 固定 uid：看板 JSON 里按 uid 引用数据源，换机器/重建也不会断
+    type: prometheus
+    access: proxy # 浏览器 -> Grafana 后端 -> Prometheus；浏览器不需要直连 prometheus:9090
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # 告诉 Grafana 抓取间隔是 5s，$__rate_interval 才能算对（至少 4 个抓取间隔 = 20s），
+      # 否则 rate() 窗口太小、样本不足两个点时曲线会断断续续。
+      timeInterval: 5s

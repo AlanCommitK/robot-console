@@ -1,0 +1,53 @@
+# 告警规则（SPEC §18）。在 http://localhost:9090/alerts 查看状态：
+#   inactive -> 条件不成立；pending -> 条件成立但还没持续够 `for`；firing -> 真正告警。
+# `for` 用来过滤抖动：一次抓取失败、一次偶发慢请求都不值得叫醒人。
+# 本项目没有接 Alertmanager（发邮件/IM 的组件），告警只在 Prometheus 界面里看。
+
+groups:
+  - name: robot-console
+    rules:
+      # 某个 API 副本连续 15 s 抓不到 /metrics（进程挂了、卡死、或容器被删了）。
+      # up 是 Prometheus 给每个 target 自动生成的指标：抓取成功 = 1，失败 = 0。
+      - alert: ApiReplicaDown
+        expr: up{job="api"} == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "API replica {{ $labels.instance }} is down"
+          description: "Prometheus has failed to scrape {{ $labels.instance }} for more than 15s."
+
+      # 连续 30 s 没有任何机器人连着（模拟器挂了、nginx 的 /ws/ 代理坏了、token 全错了……）。
+      # 注意：如果两个 API 副本全挂，rc_ws_connections 这个指标就“不存在”，sum() 结果为空，
+      # 这条规则反而不会触发——这是 PromQL 的常见坑；那种情况由 ApiReplicaDown 负责报警。
+      - alert: NoRobotsConnected
+        expr: sum(rc_ws_connections{kind="robot"}) < 1
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "No robot is connected to any API replica"
+          description: "Robot WebSocket connections across all replicas have been 0 for 30s."
+
+      # 最近 1 分钟内，命令“下发 -> 机器人 ack”的 P95 延迟超过 2 s，并持续 1 分钟。
+      # 先把两个副本的直方图桶按 le 加总（sum by (le)），再算分位数——
+      # 分位数不能先各自算再相加/平均，那在数学上没有意义。
+      - alert: CommandAckSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(rc_command_ack_latency_seconds_bucket[1m]))) > 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Command ack latency p95 is above 2s"
+          description: "p95 dispatch->ack latency is {{ $value | humanizeDuration }} over the last minute."
+
+      # 最近 5 分钟有命令过期：消息在 RabbitMQ 队列里超过 TTL（30 s）还没被机器人取走，
+      # 被转进死信交换机 cmd.dlx -> cmd.expired。通常意味着目标机器人长时间离线。
+      # 没有 `for`：哪怕只过期了一条，操作员也应该知道。
+      - alert: CommandsExpiring
+        expr: increase(rc_command_transitions_total{to_status="expired"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Commands are expiring on {{ $labels.instance }}"
+          description: "{{ $value | humanize }} command(s) expired in the last 5 minutes (robot offline longer than the queue TTL?)."

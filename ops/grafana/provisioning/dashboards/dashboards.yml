@@ -1,0 +1,15 @@
+# 看板提供者：Grafana 定期扫描 path 目录下的 *.json，自动导入/更新看板。
+apiVersion: 1
+
+providers:
+  - name: robot-console
+    orgId: 1
+    folder: "" # 放在 General 文件夹
+    type: file
+    disableDeletion: true
+    # 不允许在界面里保存修改：看板以仓库里的 JSON 为准（想改就改 JSON 文件，30 s 内自动生效），
+    # 避免“界面上改了、文件没改、重建后丢失”。
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

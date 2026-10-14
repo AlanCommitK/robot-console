@@ -1,0 +1,13 @@
+# 运行时依赖：只钉"直接依赖"的精确版本（==），保证本机、CI、Docker 装出来的是同一套代码。
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+sqlalchemy[asyncio]==2.0.54
+asyncpg==0.31.0
+alembic==1.20.0
+redis==8.1.0
+aio-pika==9.6.2
+prometheus-client==0.26.0
+pyjwt==2.15.1
+bcrypt==5.0.0
+pydantic==2.13.5
+pydantic-settings==2.15.0

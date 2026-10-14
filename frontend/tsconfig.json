@@ -1,0 +1,30 @@
+{
+  // 浏览器端代码（src/）的类型检查配置。
+  // vite.config.ts 运行在 Node 里，用另一份 tsconfig.node.json 检查，
+  // 这样 src 里就不会“意外地”能用 process、Buffer 这类只在 Node 存在的全局变量。
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+
+    // 只做类型检查，真正的编译/打包交给 Vite（esbuild + Rollup）
+    "noEmit": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "useDefineForClassFields": true,
+
+    // 严格模式：宁可在编译期多报错，也不要在运行期出 undefined
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,8 @@
+# 构建上下文里不需要这些：node_modules 会在镜像里用 npm ci 重新安装（宿主机的可能是别的平台编译的），
+# dist 会在镜像里重新构建，docs 只是 README 截图。
+node_modules
+dist
+docs
+*.log
+.vite
+.DS_Store

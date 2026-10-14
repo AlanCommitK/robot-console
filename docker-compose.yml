@@ -1,0 +1,244 @@
+# robot-console 本地全栈编排（SPEC §3、§19）
+#
+#   cp .env.example .env
+#   docker compose up -d --build
+#
+#   控制台     http://localhost:8080   (admin / admin123)；接口文档 http://localhost:8080/api/docs
+#   Grafana    http://localhost:3000   (匿名可看；管理员 admin / admin)
+#   Prometheus http://localhost:9090
+#   RabbitMQ   http://localhost:15672  (guest / guest)
+#
+# 端口绑定：只有控制台入口（nginx 的 8080）对外开放。数据库、Redis 以及 RabbitMQ 管理界面、
+# Prometheus、Grafana 这些运维界面都只绑 127.0.0.1——它们用的是公开的默认口令
+# （guest/guest、admin/admin）或者干脆没有认证，绑在 0.0.0.0 上等于把它们送给同一局域网里的任何人。
+# 本机浏览器照样能打开上面的地址；需要从别的机器访问时用 SSH 端口转发，而不是改成 0.0.0.0。
+#
+# 说明：.env 里的变量只用于替换本文件中的 ${VAR}，不会自动进入容器；
+# 容器需要的变量都在各服务的 environment 里显式列出，${VAR:-默认值} 保证没有 .env 也能启动。
+
+name: robot-console
+
+# ---------------------------------------------------------------------------
+# 以 x- 开头的顶层键是 Compose 的“扩展字段”：Compose 本身忽略它们，专门用来放可复用的片段。
+# &名字 定义 YAML 锚点，*名字 引用它，`<<: *名字` 把一个映射合并进来（浅合并，同名键以本地为准）。
+# api-1 / api-2 是同一份代码的两个副本，配置只差 REPLICA_ID，用锚点写一次即可，避免两处改漏。
+# ---------------------------------------------------------------------------
+x-backend-build: &backend-build
+  context: ./backend
+  # 构建参数：可选的国内镜像源（见 .env.example），默认为空；Dockerfile 只在非空时才使用它。
+  # simulator 用同一个 PIP_INDEX_URL，nginx（前端）用 NPM_REGISTRY。
+  args:
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+
+x-backend-env: &backend-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://robot:robot@postgres:5432/robot}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  RABBITMQ_URL: ${RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
+  JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me-at-least-32-bytes-long}
+  JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-480}
+  COMMAND_TTL_MS: ${COMMAND_TTL_MS:-30000}
+  ACK_TIMEOUT_S: ${ACK_TIMEOUT_S:-10}
+  RESULT_TIMEOUT_S: ${RESULT_TIMEOUT_S:-300}
+  ROBOT_ONLINE_TTL_S: ${ROBOT_ONLINE_TTL_S:-5}
+  TELEMETRY_FLUSH_INTERVAL_S: ${TELEMETRY_FLUSH_INTERVAL_S:-1.0}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+
+x-api: &api
+  build: *backend-build
+  restart: unless-stopped
+  # depends_on 只决定“启动顺序”，condition 决定“等到什么程度”：
+  #   service_healthy                 —— 等对方 healthcheck 变成 healthy（容器“已启动” ≠ 服务“可用”：
+  #                                      Postgres 要先初始化数据目录，RabbitMQ 的 Erlang 节点要启动
+  #                                      十几秒，这期间去连只会失败）
+  #   service_completed_successfully  —— 等一次性任务跑完且退出码为 0（迁移没成功就别起 API）
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  healthcheck:
+    # 和 backend/Dockerfile 里的 HEALTHCHECK 一样走 /api/health（它会检查 db/redis/rabbitmq）；
+    # ProxyHandler({}) 让 urllib 忽略容器里可能被注入的 HTTP(S)_PROXY，127.0.0.1 不该走代理。
+    test:
+      - CMD
+      - python
+      - -c
+      - "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:8000/api/health', timeout=3)"
+    interval: 5s
+    timeout: 5s
+    retries: 10
+    start_period: 15s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-robot}
+      POSTGRES_USER: ${POSTGRES_USER:-robot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-robot}
+    ports:
+      - "127.0.0.1:5432:5432" # 只绑本机回环：方便本机工具连库，又不暴露给局域网
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 强制走 TCP：首次初始化数据目录时，镜像会先起一个“只监听 unix socket”的临时实例
+      # 跑初始化脚本，再重启成正式实例。不加 -h 的话 pg_isready 会在临时实例阶段就报 ready，
+      # migrate 这时用 TCP 去连就会被拒绝（经典的“第一次 up 必失败”问题）。
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "${POSTGRES_USER:-robot}", "-d", "${POSTGRES_DB:-robot}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    # RabbitMQ 把数据存在以“节点名 rabbit@<主机名>”命名的目录里。不固定 hostname 的话，
+    # 每次重建容器主机名（=容器 ID）都会变，持久化的队列就“找不到了”。
+    hostname: rabbitmq
+    ports:
+      - "127.0.0.1:15672:15672" # 管理界面（guest/guest）只给本机；AMQP 5672 和指标 15692 只在 compose 内部网络可达
+    volumes:
+      - ./ops/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s # Erlang 节点启动慢；这段时间内失败不计入 retries
+    restart: unless-stopped
+
+  migrate:
+    # 一次性任务：建表/升级 schema + 灌种子数据，成功后退出（exit 0）。
+    # 单独拆出来而不是让 API 启动时自己迁移：两个副本同时启动会并发跑迁移、互相踩。
+    build: *backend-build
+    command: ["sh", "-c", "alembic upgrade head && python -m app.seed"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy # 迁移只需要数据库
+    healthcheck:
+      disable: true # 镜像里的 HEALTHCHECK 是给常驻的 API 用的，对一次性任务没有意义
+    restart: "no" # 一次性任务失败了就该停下让人看日志，自动重启只会反复失败
+
+  api-1:
+    <<: *api
+    environment:
+      <<: *backend-env
+      REPLICA_ID: api-1
+
+  api-2:
+    <<: *api
+    environment:
+      <<: *backend-env
+      REPLICA_ID: api-2
+
+  nginx:
+    build:
+      context: ./frontend
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    ports:
+      - "8080:80"
+    # 等两个副本都 healthy 再启动，保证第一个请求进来时后端已经能服务。
+    # （nginx.conf 的 upstream 用了 resolve + Docker 内置 DNS 动态解析，API 容器后起或被重建换了 IP 也能自动跟上。）
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  simulator:
+    build:
+      context: ./simulator
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    environment:
+      WS_URL: ${WS_URL:-ws://nginx/ws/robot}
+      ROBOTS: ${ROBOTS:-robot-1:dev-token-robot-1,robot-2:dev-token-robot-2,robot-3:dev-token-robot-3,robot-4:dev-token-robot-4}
+      TELEMETRY_HZ: ${TELEMETRY_HZ:-5}
+      CHAOS_DISCONNECT_PER_MIN: ${CHAOS_DISCONNECT_PER_MIN:-0.5}
+      FAIL_RATE: ${FAIL_RATE:-0.05}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # 只等 nginx “已启动”而不是 healthy：模拟器自带指数退避重连，本来就要能扛住服务端暂时不可用
+    # （运行中 nginx 重启、API 副本挂掉也是同一套逻辑），启动顺序只是锦上添花。
+    depends_on:
+      nginx:
+        condition: service_started
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # 允许 `curl -X POST http://localhost:9090/-/reload` 热加载改过的配置/告警规则，不用重启容器
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:9090:9090" # 没有认证，还开着 /-/reload 等管理接口：只给本机
+    volumes:
+      - ./ops/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # 只在第一次启动（grafana-data 卷还是空的）时生效；之后改密码要用 grafana cli 或界面
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/robot-console.json
+    ports:
+      - "127.0.0.1:3000:3000" # 匿名可看 + 默认 admin/admin：只给本机
+    volumes:
+      # provisioning = “配置即代码”：数据源和看板由文件声明，删卷重建也会自动恢复，不用手工点界面。
+      # 只挂两个子目录而不是整个 provisioning/：整个挂载会遮住镜像自带的 alerting/、plugins/ 空目录，
+      # Grafana 启动日志里就会出现几条吓人的 "can't read ... provisioning" 错误。
+      - ./ops/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+# 具名卷：数据存在 Docker 管理的卷里，`docker compose down` 删容器不会丢数据；
+# 想彻底清空用 `docker compose down -v`。
+volumes:
+  pgdata:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:

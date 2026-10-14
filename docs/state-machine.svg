@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 640" width="1140" height="640" role="img" aria-labelledby="title desc">
+  <title id="title">Command state machine</title>
+  <desc id="desc">States queued, dispatched, acked, succeeded, failed, expired and the events that move a command between them, as implemented in backend/app/state_machine.py.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1e293b; }
+      .state { stroke: #475569; stroke-width: 1.5; }
+      .terminal-outer { fill: none; stroke: #475569; stroke-width: 1.5; }
+      .name { font-size: 17px; font-weight: 600; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+      .edge { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .label { font-size: 13.5px; fill: #334155; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; paint-order: stroke; stroke: #ffffff; stroke-width: 6px; stroke-linejoin: round; }
+      .note { font-size: 13.5px; fill: #475569; paint-order: stroke; stroke: #ffffff; stroke-width: 6px; stroke-linejoin: round; }
+      .heading { font-size: 16px; font-weight: 600; }
+      .caption { font-size: 13.5px; fill: #475569; }
+    </style>
+  </defs>
+
+  <!-- solid background so the diagram reads on light and dark page themes -->
+  <rect x="0" y="0" width="1140" height="640" fill="#ffffff"/>
+
+  <text class="heading" x="20" y="34">Command state machine (backend/app/state_machine.py)</text>
+
+  <!-- live states -->
+  <rect rx="10" class="state" x="55" y="172" width="150" height="56" fill="#dbeafe"/>
+  <text class="name" x="130" y="206" text-anchor="middle">queued</text>
+
+  <rect rx="10" class="state" x="345" y="172" width="150" height="56" fill="#dbeafe"/>
+  <text class="name" x="420" y="206" text-anchor="middle">dispatched</text>
+
+  <rect rx="10" class="state" x="635" y="172" width="150" height="56" fill="#dbeafe"/>
+  <text class="name" x="710" y="206" text-anchor="middle">acked</text>
+
+  <!-- terminal states (double border) -->
+  <rect rx="13" class="terminal-outer" x="960" y="167" width="160" height="66"/>
+  <rect rx="10" class="state" x="965" y="172" width="150" height="56" fill="#dcfce7"/>
+  <text class="name" x="1040" y="206" text-anchor="middle">succeeded</text>
+
+  <rect rx="13" class="terminal-outer" x="560" y="427" width="160" height="66"/>
+  <rect rx="10" class="state" x="565" y="432" width="150" height="56" fill="#fee2e2"/>
+  <text class="name" x="640" y="466" text-anchor="middle">failed</text>
+
+  <rect rx="13" class="terminal-outer" x="195" y="427" width="160" height="66"/>
+  <rect rx="10" class="state" x="200" y="432" width="150" height="56" fill="#f1f5f9"/>
+  <text class="name" x="275" y="466" text-anchor="middle">expired</text>
+
+  <!-- happy path -->
+  <path class="edge" d="M 205 200 L 343 200"/>
+  <text class="label" x="274" y="191" text-anchor="middle">dispatch</text>
+
+  <path class="edge" d="M 405 172 C 385 112, 455 112, 435 172"/>
+  <text class="label" x="420" y="118" text-anchor="middle">dispatch (redelivery, attempts + 1)</text>
+
+  <path class="edge" d="M 495 200 L 633 200"/>
+  <text class="label" x="564" y="191" text-anchor="middle">ack</text>
+
+  <path class="edge" d="M 785 200 L 963 200"/>
+  <text class="label" x="874" y="191" text-anchor="middle">result_succeeded</text>
+
+  <path class="edge" d="M 495 185 Q 740 60 1020 170"/>
+  <text class="label" x="765" y="106" text-anchor="middle">result_succeeded (implied ack)</text>
+
+  <!-- failures -->
+  <path class="edge" d="M 450 228 L 610 432"/>
+  <text class="label" x="540" y="312" text-anchor="start">result_failed</text>
+  <text class="label" x="540" y="328" text-anchor="start">ack_timeout</text>
+
+  <path class="edge" d="M 700 228 L 675 432"/>
+  <text class="label" x="700" y="322" text-anchor="start">result_failed</text>
+  <text class="label" x="700" y="338" text-anchor="start">result_timeout (sweeper)</text>
+
+  <path class="edge" d="M 55 214 L 30 214 L 30 560 L 640 560 L 640 494"/>
+  <text class="label" x="335" y="552" text-anchor="middle">result_failed (publish_failed)</text>
+
+  <!-- expiry -->
+  <path class="edge" d="M 160 228 L 240 432"/>
+  <text class="label" x="186" y="322" text-anchor="end">expire</text>
+  <text class="label" x="186" y="338" text-anchor="end">(DLX / sweeper)</text>
+
+  <path class="edge" d="M 390 228 L 310 432"/>
+  <text class="label" x="340" y="322" text-anchor="end">expire</text>
+  <text class="label" x="340" y="338" text-anchor="end">(DLX / sweeper)</text>
+
+  <!-- legend -->
+  <rect class="terminal-outer" x="790" y="440" width="36" height="24" rx="6"/>
+  <rect class="state" x="794" y="444" width="28" height="16" rx="4" fill="#f8fafc"/>
+  <text class="caption" x="836" y="457">terminal state: every further event is ignored</text>
+  <text class="caption" x="790" y="484">Pairs not drawn (duplicate ack, a result after</text>
+  <text class="caption" x="790" y="502">a terminal state, ...) return None: no change.</text>
+
+  <text class="caption" x="20" y="616">Events: dispatch, ack, result_succeeded, result_failed, expire, ack_timeout, result_timeout. All 6 x 7 pairs are unit-tested.</text>
+</svg>

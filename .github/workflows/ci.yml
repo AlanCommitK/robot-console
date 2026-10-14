@@ -1,0 +1,129 @@
+# GitHub Actions CI（SPEC §20）。每次 push / PR 自动运行；下面 4 个 job 互不依赖，并行执行。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# 同一个分支连续推送时，取消还在跑的旧流水线，只看最新提交的结果
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：CI 只需要读代码
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # services = 与 job 同时启动的“旁挂容器”。job 的 steps 直接跑在 runner 虚拟机上（不在容器里），
+    # 所以通过映射到 localhost 的端口访问它们。
+    # options 里的 --health-* 会让 GitHub 等到容器变成 healthy 才开始执行 steps，
+    # 作用和 docker-compose.yml 里的 `condition: service_healthy` 一样，避免测试连上一个还没就绪的库。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: robot
+          POSTGRES_USER: robot
+          POSTGRES_PASSWORD: robot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U robot -d robot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      rabbitmq:
+        image: rabbitmq:3.13-management-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 20s
+    env:
+      DATABASE_URL: postgresql+asyncpg://robot:robot@localhost:5432/robot
+      REDIS_URL: redis://localhost:6379/0
+      RABBITMQ_URL: amqp://guest:guest@localhost:5672/
+      JWT_SECRET: ci-secret-not-for-production-32-bytes-min
+      REPLICA_ID: ci
+      RUN_INTEGRATION: "1" # 打开 @pytest.mark.integration 的集成测试
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+      - name: Lint
+        run: ruff check backend
+      - name: Run migrations
+        working-directory: backend
+        run: alembic upgrade head
+      - name: Seed users and robots
+        working-directory: backend
+        run: python -m app.seed # 幂等；集成测试要用 admin / viewer 账号登录
+      - name: Tests (unit + integration)
+        working-directory: backend
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci # 严格按 package-lock.json 安装，保证和本地/镜像里的依赖版本一致
+      - name: Type-check and build
+        run: npm run build
+
+  simulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: simulator/requirements.txt
+      - name: Install dependencies
+        run: pip install -r simulator/requirements.txt pytest==9.1.1
+      - name: Unit tests
+        run: pytest -q simulator/tests
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create .env from the template
+        run: cp .env.example .env
+      - name: Validate docker-compose.yml
+        run: docker compose config -q
+      - name: Build all images
+        run: docker compose build

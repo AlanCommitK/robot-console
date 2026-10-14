@@ -1,0 +1,36 @@
+# Prometheus 配置（SPEC §18）。改完可热加载：curl -X POST http://localhost:9090/-/reload
+
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s # 不能大于 scrape_interval（Prometheus 会拒绝这种配置）：一次抓取不能拖过下一次
+  # 规则（告警）多久计算一次。默认是 1m——那样 `for: 15s` 的告警实际要等一分钟才会触发。
+  evaluation_interval: 5s
+
+rule_files:
+  - alerts.yml # 相对路径：相对本文件所在目录（容器内 /etc/prometheus/）
+
+scrape_configs:
+  # 为什么直接抓 api-1:8000 / api-2:8000，而不是抓 nginx:80/metrics？
+  # 1) nginx 会把请求轮询分给两个副本：同一个时间序列一会儿是 api-1 的计数、一会儿是 api-2 的，
+  #    counter 来回跳变，rate() 算出来全是垃圾；
+  # 2) Prometheus 的模型是“每个进程是一个 target”：分开抓才有 instance 标签，
+  #    才能看出是哪个副本慢、哪个副本挂了（up{job="api"} == 0 正是靠这个）；
+  # 3) /metrics 是内部接口，nginx 本来就不对外暴露它（SPEC §16）。
+  # Prometheus 和 API 在同一个 compose 网络里，直接用服务名访问即可。
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api-1:8000", "api-2:8000"]
+
+  # RabbitMQ 自带的 rabbitmq_prometheus 插件，端口 15692。
+  # 默认的 /metrics 只给“所有队列加总”的数字；/metrics/per-object 按队列拆开（带 queue 标签），
+  # 看板才能画出 cmd.robot.robot-1 这类每个队列的积压。队列只有十来个，开销可以忽略；
+  # 成千上万个队列的生产环境才需要改用 /metrics/detailed 只挑需要的指标族。
+  - job_name: rabbitmq
+    metrics_path: /metrics/per-object
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
