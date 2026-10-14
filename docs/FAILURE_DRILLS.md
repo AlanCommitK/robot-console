@@ -258,7 +258,7 @@ queues                                   # 每个机器人队列 1 个消费者�
 ### 机制解释
 
 - **消息持久化**：命令以持久消息（`delivery_mode=2`）发布到持久队列，且要等到 publisher confirm 才向客户端返回 202，所以已返回 202 的命令已被 broker 可靠接收。RabbitMQ 数据在卷 `rabbitmq-data` 里，容器主机名固定为 `rabbitmq`，重启后节点名不变，能找回原来的队列。
-- **自动恢复**：连接由 `connect_robust` 自动重连。每个消费循环（`CommandDispatcher._keep_consuming`）发现 channel 已关闭，就等待连接就绪、暂停 1 s，然后打开新 channel、重新声明拓扑（机器人队列；死信消费者还会重新声明 `cmd.dlx`、`cmd.expired` 和它们之间的绑定）并继续消费；发布 channel 在下一次发布时重新打开。
+- **自动恢复**：连接由 `connect_robust` 自动重连。每个消费循环（`CommandDispatcher._keep_consuming`）发现 channel 已关闭，就先暂停 1 s，再等待连接就绪（`_open_channel` 开头的 `connection.ready()`），然后打开新 channel、重新声明拓扑（机器人队列；死信消费者还会重新声明 `cmd.dlx`、`cmd.expired` 和它们之间的绑定）并继续消费；发布 channel 在下一次发布时重新打开。
 - **在途消息**：重启时尚未确认的消息会回到队列，重新投递时 `attempts` 加 1，机器人按 `command_id` 去重。
 
 <a id="drill-ghost-consumer"></a>

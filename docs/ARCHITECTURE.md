@@ -255,7 +255,7 @@ acked      -> succeeded    api-1
 
 - **健康检查**：`/api/health` 的 `rabbitmq` 检查失败，返回 503 和 `"status": "degraded"`，容器被标记为 unhealthy。Nginx 不会因此摘掉副本，因为 `proxy_next_upstream` 不包含 `http_503`，只读接口照常可用。
 - **新命令**：发布在 5 s 预算内失败，命令被标记为 `failed`（`publish_failed`），接口返回 503。用同一个幂等键重试会拿到这条已失败的命令（HTTP 200），重新下发需要新键。
-- **恢复**：`connect_robust` 自动重连。每个消费循环发现自己的 channel 已关闭，就等连接恢复、暂停 1 s 后重新打开 channel 并重新声明拓扑（`CommandDispatcher._keep_consuming`）；发布 channel 在下一次发布时重新打开。
+- **恢复**：`connect_robust` 自动重连。每个消费循环发现自己的 channel 已关闭，就先暂停 1 s，再等连接恢复（`_open_channel` 开头的 `connection.ready()`），然后重新打开 channel 并重新声明拓扑（`CommandDispatcher._keep_consuming`）；发布 channel 在下一次发布时重新打开。
 - **消息不丢**：命令是持久消息、队列是持久队列，RabbitMQ 数据保存在卷 `rabbitmq-data` 里，容器主机名固定为 `rabbitmq`（RabbitMQ 按节点名 `rabbit@<主机名>` 存数据，主机名变了就找不到原来的队列）。
 - **没有幽灵消费者**：所有 channel 都是普通 channel，不会被 aio-pika 在重连后自动恢复，原因见[第 6.14 节](#decision-plain-channels)。
 
@@ -525,7 +525,7 @@ acked      -> succeeded    api-1
 
 **备选方案**：只在一个"主副本"上运行（需要选主）；独立的定时任务进程或 cron；普通 `FOR UPDATE`；不做兜底。
 
-**为什么这样选**：正常情况下每条命令都会被某个事件推到终态，但事件的来源本身可能消失：进程死在提交与发布之间，应用 ack 或结果时数据库刚好出错，机器人 ack 之后崩溃。这些命令没有消息可以过期，也不会再收到事件。每个副本都运行清扫器，就没有单点，也不需要选主。`SKIP LOCKED` 让正被别的事务锁着的行直接跳过，两个副本同时扫描时各自只拿到"此刻没人在处理"的行，同一行只会被一个副本处理，而且从不排队等锁；普通 `FOR UPDATE` 会让后到的副本在锁上排队，等前一个提交后再去处理一行已经不满足条件的数据。多留 60 s 余量，是为了只处理死信肯定不会再来的命令，不和正常的过期路径抢。转移仍走 `transition_locked`，和 `apply_event` 是同一套规则；恰好同时到达的正常事件会在 `apply_event` 的 `FOR UPDATE` 上等清扫事务提交，再基于新状态判断。
+**为什么这样选**：正常情况下每条命令都会被某个事件推到终态，但事件的来源本身可能消失：进程死在提交与发布之间，应用 ack 或结果时数据库刚好出错，机器人 ack 之后崩溃。这些命令没有消息可以过期，也不会再收到事件。每个副本都运行清扫器，就没有单点，也不需要选主。`SKIP LOCKED` 让正被别的事务锁着的行直接跳过，两个副本同时扫描时各自只拿到"此刻没人在处理"的行，同一行只会被一个副本处理，而且从不排队等锁；普通 `FOR UPDATE` 会让后到的副本在锁上排队：等前一个提交后，PostgreSQL 用这一行的最新版本重新检查查询条件，行已是终态就不再返回，浪费的是这段等锁的时间。多留 60 s 余量，是为了只处理死信肯定不会再来的命令，不和正常的过期路径抢。转移仍走 `transition_locked`，和 `apply_event` 是同一套规则；恰好同时到达的正常事件会在 `apply_event` 的 `FOR UPDATE` 上等清扫事务提交，再基于新状态判断。
 
 **代价**：兜底有延迟，一条卡住的 `queued` 命令最晚在最后一次更新后约 120 s（90 s 阈值加 30 s 扫描间隔）才被标为过期。`RESULT_TIMEOUT_S` 必须大于最长的合法执行时间，否则会把还在执行的长 `move_to` 判为失败。查询条件涉及非终态的行，数据量大时应加部分索引（`sweeper.py` 的注释给出了 `ON commands (updated_at) WHERE status IN ('queued','dispatched','acked')`，当前迁移没有创建）。
 
@@ -545,7 +545,7 @@ acked      -> succeeded    api-1
 
 ### 6.14 消费者用普通 channel 并自行重开
 
-**决策**：连接用 `aio_pika.connect_robust`（断线后自动重连），但所有 channel 都是普通的 `aio_pika.Channel`。每个消费循环自己打开 channel、声明拓扑、消费到 channel 关闭，然后等连接就绪、暂停 1 s 重新打开；遇到异常按 1 s 到 15 s 指数退避（`backend/app/mq.py`、`CommandDispatcher._keep_consuming`）。
+**决策**：连接用 `aio_pika.connect_robust`（断线后自动重连），但所有 channel 都是普通的 `aio_pika.Channel`。每个消费循环自己打开 channel、声明拓扑、消费到 channel 关闭，然后暂停 1 s、等连接就绪后重新打开；遇到异常按 1 s 到 15 s 指数退避（`backend/app/mq.py`、`CommandDispatcher._keep_consuming`）。
 
 **备选方案**：使用 `connection.channel()` 返回的 robust channel，让 aio-pika 在重连后自动恢复 channel 和其上的消费者。
 
